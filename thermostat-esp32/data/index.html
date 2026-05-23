@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8"/>
+  <title>Thermostat Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    :root {
+      --bg:#ffffff; --fg:#222; --muted:#777; --card:#f7f7f7; --axis:#00000066; --grid:#00000012; --line:#0b6;
+    }
+    [data-theme="dark"] {
+      --bg:#0f1115; --fg:#eaeef2; --muted:#9aa4b2; --card:#171a21; --axis:#ffffff66; --grid:#ffffff13; --line:#38bdf8;
+    }
+    html,body { height:100%; }
+    body { background: var(--bg); color: var(--fg);
+           font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin: 16px; }
+    h1 { margin: 0 0 8px 0; }
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:baseline; }
+    .metric { font-size: 1.4rem; }
+    .metric-input {
+  font-size: 1.4rem;
+  font-family: inherit;
+  font-weight: bold;
+  width: 70px;
+  background: var(--card);
+  color: var(--fg);
+  border: 2px solid var(--grid);
+  border-radius: 8px;
+  padding: 4px;
+  text-align: center;
+  transition: all 0.2s ease-in-out;
+  margin-left: 8px;
+}
+.metric-input:focus {
+  outline: none;
+  border-color: var(--line);
+}
+    .label { color: var(--muted); font-size:.9rem; }
+    .grid { display:grid; grid-template-columns: repeat(2, minmax(280px,1fr)); gap:16px; }
+    .card { background: var(--card); border-radius: 12px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .title { color: var(--muted); margin-bottom: 6px; }
+    canvas { width:100%; height:200px; display:block; }
+    .ts { color: var(--muted); margin-top: 8px; font-size:.9rem; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+ 
+    /* Toggle + status pill */
+    .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:12px; }
+    .toggle { cursor:pointer; padding:6px 10px; border-radius:10px; background:var(--card); border:1px solid #00000010; }
+    .pill { position: sticky; top: 8px; align-self: start; padding:6px 10px; border-radius:999px;
+            background:var(--card); border:1px solid #00000010; color:var(--fg); font-size:.9rem; }
+    .pill a { color: inherit; text-decoration: none; border-bottom:1px dotted var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Thermostat Dashboard</h1>
+    <div class="toggle" id="themeToggle">🌙 Dark mode</div>
+  </div>
+ 
+  <div class="row" style="margin-bottom:8px;">
+    <div class="pill" id="status">Wi-Fi: -- dBm · Uptime: --:--:-- · <a href="http://thermostat.local" target="_blank" rel="noreferrer">thermostat.local</a></div>
+  </div>
+ 
+  <div class="row">
+    <div>
+      <span class="label">Desired Temp</span> 
+      <input class="metric-input" type="number" id="desiredTmp" min="10" max="35" step="1" onchange="updateDesiredTmp()" placeholder="--"/>
+      <span class="metric">°C</span>
+    </div>
+    <div><span class="label">Current temperature</span> <span id="t" class="metric">--</span></div>
+    <div><span class="label">Humidity</span> <span id="h" class="metric">--</span></div>
+  </div>
+ 
+  <div class="grid" style="margin-top:12px;">
+    <div class="card"><div class="title">Temperature (°C)</div><canvas id="ct"></canvas></div>
+    <div class="card"><div class="title">Humidity (%)</div><canvas id="ch"></canvas></div>
+  </div>
+ 
+  <div class="ts" id="ts">Waiting for data…</div>
+ 
+<script>
+const secsWindow = 300; // 5 minutes
+function $(id){ return document.getElementById(id); }
+ 
+// ---- Theme toggle (persisted) ----
+(function initTheme(){
+  const saved = localStorage.getItem('theme') || 'light';
+  document.documentElement.setAttribute('data-theme', saved);
+  $('themeToggle').textContent = saved === 'dark' ? '☀️ Light mode' : '🌙 Dark mode';
+  $('themeToggle').addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme') || 'light';
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+    $('themeToggle').textContent = next === 'dark' ? '☀️ Light mode' : '🌙 Dark mode';
+  });
+})();
+ 
+// ---- Chart helpers ----
+function decimalsForRange(range){
+  if (!isFinite(range) || range <= 0) return 1;
+  if (range < 2) return 2;
+  if (range < 20) return 1;
+  return 0;
+}
+function drawSeries(canvas, secondsAgo, values, color) {
+  const dpr = window.devicePixelRatio || 1;
+  const padL = 48 * dpr, padR = 8 * dpr, padT = 8 * dpr, padB = 18 * dpr;
+ 
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width  = Math.max(10, canvas.clientWidth  * dpr);
+  const h = canvas.height = Math.max(10, canvas.clientHeight * dpr);
+ 
+  ctx.clearRect(0,0,w,h);
+  if (!values || values.length < 2) return;
+ 
+  const clean = values.filter(v => isFinite(v));
+  if (clean.length < 2) return;
+ 
+  let vMin = Math.min(...clean);
+  let vMax = Math.max(...clean);
+  if (vMin === vMax) { vMin -= 0.5; vMax += 0.5; }
+  const pad = (vMax - vMin) * 0.08;
+  const yMin = vMin - pad;
+  const yMax = vMax + pad;
+  const yRange = yMax - yMin;
+  const yDec = decimalsForRange(yRange);
+ 
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+ 
+  // Axes + grid
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis').trim();
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, h - padB); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+ 
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis').trim();
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.font = `${12*dpr}px system-ui,-apple-system,Segoe UI,Roboto,sans-serif`;
+  for (let i = 0; i <= 5; i++) {
+    const frac = i / 5;
+    const yVal = yMax - yRange * frac;
+    const y = padT + plotH * frac;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+    ctx.fillText(yVal.toFixed(yDec), padL - 6*dpr, y);
+  }
+ 
+  const xForSec = s => padL + plotW * (1 - Math.min(s, secsWindow) / secsWindow);
+  const yForVal = v => padT + plotH * ((yMax - v) / yRange);
+ 
+  ctx.strokeStyle = color || getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
+  ctx.lineWidth = Math.max(1, 1.5 * dpr);
+  ctx.beginPath();
+  for (let i = 0; i < values.length; i++) {
+    const x = xForSec(secondsAgo[i]);
+    const y = yForVal(values[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+ 
+  // X labels
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis').trim();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const xLabels = [{s:300, txt:'-5m'}, {s:150, txt:'-2.5m'}, {s:5, txt:'now'}];
+  xLabels.forEach(l=>{
+    const x = xForSec(l.s);
+    ctx.fillText(l.txt, x, h - padB + 4*dpr);
+  });
+}
+ 
+// ---- Data refresh ----
+async function refreshHistory() {
+  try {
+    const r = await fetch('/api/history', {cache:'no-store'});
+    const j = await r.json();
+    if (!j.ok) { $('ts').textContent = 'No data'; return; }
+ 
+    const n = j.n || 0;
+    if (n>0) {
+      $('t').textContent = j.tc[n-1].toFixed(2)+' °C';
+      $('h').textContent = j.rh[n-1].toFixed(1)+' %';
+    }
+ 
+    drawSeries($('ct'), j.s, j.tc, '#e4572e');
+    drawSeries($('ch'), j.s, j.rh, '#17bebb');
+ 
+    $('ts').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+  } catch {
+    $('ts').textContent = 'Fetch error';
+  }
+}
+// ---- Data refresh ----
+async function refreshSensorData() {
+  try {
+    const r = await fetch('/api/sensor', {cache:'no-store'});
+    const j = await r.json();
+    if (!j.ok) { $('ts').textContent = 'No data'; return; }
+ 
+    $('t').textContent = j.tc[n-1].toFixed(2)+' °C';
+    $('h').textContent = j.rh[n-1].toFixed(1)+' %';
+  }catch {
+    $('ts').textContent = 'Fetch error';
+  }
+}
+function fmtUptime(sec){
+  const h = Math.floor(sec/3600);
+  const m = Math.floor((sec%3600)/60);
+  const s = sec%60;
+  const pad = n => n.toString().padStart(2,'0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+ 
+async function refreshStatus(){
+  try {
+    const r = await fetch('/api/status', {cache:'no-store'});
+    const j = await r.json();
+    const rssi = (j && Number.isFinite(j.rssi_dbm)) ? `${j.rssi_dbm} dBm` : '-- dBm';
+    const up   = (j && Number.isFinite(j.uptime_s)) ? fmtUptime(j.uptime_s) : '--:--:--';
+    $('status').innerHTML = `Wi-Fi: ${rssi} · Uptime: ${up} · <a href="http://${j.hostname||'thermostat'}.local" target="_blank" rel="noreferrer">${j.hostname||'thermostat'}.local</a>`;
+  } catch {
+    $('status').textContent = 'Wi-Fi: -- dBm · Uptime: --:--:-- · thermostat.local';
+  }
+}
+async function updateDesiredTmp() {
+  const inputEl = $('desiredTmp');
+  const desiredTmp = inputEl.value;
+  
+  if (!desiredTmp) return;
+
+  try {
+    // 1. Visual cue that it is sending
+    inputEl.style.opacity = "0.5"; 
+    
+    // 2. Send the request
+    const r = await fetch('/api/set-desired-tmp?desired-tmp=' + desiredTmp, {cache:'no-store'});
+    
+    if (r.ok) {
+      // 3. Success! Flash green
+      inputEl.style.borderColor = "#0b6"; 
+      inputEl.style.color = "#0b6";
+    } else {
+      throw new Error("Server failed");
+    }
+  } catch (error) {
+    // 4. Failure! Flash red
+    inputEl.style.borderColor = "#e4572e"; 
+    inputEl.style.color = "#e4572e";
+  } finally {
+    // 5. Restore normal appearance after 1.5 seconds
+    inputEl.style.opacity = "1";
+    setTimeout(() => {
+      inputEl.style.borderColor = "";
+      inputEl.style.color = "";
+    }, 1500);
+  }
+}
+async function refreshDesiredTmp() {
+  const inputEl = $('desiredTmp');
+  
+  // UX FIX: Do not overwrite the value if the user is currently typing in the box!
+  if (document.activeElement === inputEl) {
+    return; 
+  }
+
+  try {
+    const r = await fetch('/api/get-desired-tmp', {cache:'no-store'});
+    if (r.ok) {
+      const serverTmp = await r.text();
+      // Only update if the server actually returned a number
+      if (serverTmp && !isNaN(serverTmp)) {
+        inputEl.value = serverTmp;
+      }
+    }
+  } catch (error) {
+    // Silently fail. The next polling cycle will try again.
+    console.error("Failed to fetch desired temp");
+  }
+}
+refreshHistory();
+refreshStatus();
+refreshDesiredTmp();
+setInterval(refreshHistory, 2000);
+setInterval(refreshStatus, 5000);
+setInterval(refreshDesiredTmp, 5000);
+</script>
+</body>
+</html>

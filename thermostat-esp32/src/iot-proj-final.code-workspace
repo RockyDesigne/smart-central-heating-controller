@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../Projects/SGCS-final-project-hw-homework"
+		},
+		{
+			"name": "IoT-ESP8266",
+			"path": "../../IoT-ESP8266"
+		},
+		{
+			"name": "thermostat-esp32",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
